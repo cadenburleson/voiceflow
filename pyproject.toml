@@ -22,6 +22,16 @@ dependencies = [
 [project.scripts]
 voiceflow = "voiceflow.main:main"
 
+# Build-time only — not bundled into the app. Needed to produce a release:
+#   pyinstaller -> the standalone VoiceFlow.app (packaging/build_release.sh)
+#   pillow      -> the .icns app icon (assets/icon/make_icns.py)
+# Installed by `uv sync` (default groups include `dev`).
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.20",
+    "pillow>=11",
+]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
