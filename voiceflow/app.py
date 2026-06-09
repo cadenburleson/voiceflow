@@ -11,11 +11,11 @@ import numpy as np
 import objc
 import rumps
 from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification
-from Foundation import NSObject
+from Foundation import NSObject, NSProcessInfo
 from PyObjCTools import AppHelper
 from pynput import keyboard
 
-from . import audio, cleanup, config, loginitem, logsetup, onboarding, transcribe
+from . import audio, cleanup, config, loginitem, logsetup, onboarding, power, transcribe
 from .audio import Recorder
 from .config import Config
 from .inserter import insert_text
@@ -27,6 +27,25 @@ IDLE = "🎙️"
 RECORDING = "🔴"
 WORKING = "✍️"
 LOADING = "⏳"
+
+# Keep MLX/Metal warm. The GPU clocks down ~5s after work, so nudge every few
+# seconds to stay hot; relax to a long interval when we're letting it cool.
+WARM_ACTIVE_INTERVAL = 2.0   # keep the GPU mostly hot during active use
+WARM_IDLE_INTERVAL = 30.0    # relaxed (battery saver) — bounds deep-cold only
+WARM_ACTIVE_WINDOW = 120.0   # "adaptive": stay hot this long after last use
+COLD_AFTER = 5.0             # show "Warming up…" if the GPU has been idle longer
+AC_RECHECK = 15.0            # re-check power source at most this often
+
+WARM_PRESETS = [
+    ("adaptive", "Adaptive (warm after recent use)"),
+    ("always", "Always instant (more battery)"),
+    ("battery_first", "Relaxed (battery saver)"),
+]
+WARM_LABELS = dict(WARM_PRESETS)
+
+# NSActivityUserInitiated without the sleep-disable bit: prevents App Nap from
+# throttling us while still letting the Mac sleep normally.
+_ACTIVITY_OPTS = 0x00FFFFFF
 
 # Common conflict-free triggers offered in the menu. (name, friendly label)
 HOTKEY_PRESETS = [
@@ -100,6 +119,13 @@ class VoiceFlowApp(rumps.App):
         logsetup.setup()
         log.info("VoiceFlow starting; hotkey=%s mode=%s", cfg.hotkey, cfg.mode)
         self.cfg = cfg
+
+        # Stop macOS App Nap from throttling the background app, so timers and
+        # the keep-warm thread stay responsive after idle. Hold the token.
+        self._activity = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+            _ACTIVITY_OPTS, "VoiceFlow low-latency dictation"
+        )
+
         self.recorder = Recorder(cfg.samplerate, cfg.continuous_mic, cfg.preroll_seconds)
         self.overlay = Overlay() if cfg.show_overlay else None
         self._matches = _make_matcher(cfg.hotkey)
@@ -108,6 +134,12 @@ class VoiceFlowApp(rumps.App):
         self._busy = False  # transcribing/inserting — ignore the trigger
         self._capturing = False  # waiting to bind the next key press
         self._start_time = 0.0
+
+        # keep-warm bookkeeping (monotonic clocks)
+        self._last_activity = time.monotonic()  # last real dictation
+        self._last_gpu = 0.0  # last GPU work (warm-up / keep-warm / transcribe)
+        self._ac_cached = True
+        self._ac_checked = 0.0
 
         self._level_timer = rumps.Timer(self._tick_level, 0.05)
 
@@ -131,6 +163,17 @@ class VoiceFlowApp(rumps.App):
             self._mode_items[name] = item
             mode_menu.add(item)
 
+        warm_menu = rumps.MenuItem("Speed / Warm-up")
+        self._warm_items: dict[str, rumps.MenuItem] = {}
+        for name, label in WARM_PRESETS:
+            item = rumps.MenuItem(label, callback=self._on_pick_warm)
+            self._warm_items[name] = item
+            warm_menu.add(item)
+        warm_menu.add(rumps.separator)
+        self._ac_item = rumps.MenuItem("Always warm when plugged in", callback=self._toggle_warm_ac)
+        self._ac_item.state = 1 if cfg.warm_on_ac else 0
+        warm_menu.add(self._ac_item)
+
         self._login_item = rumps.MenuItem("Launch at Login", callback=self._toggle_login)
         self._login_item.state = 1 if loginitem.is_enabled() else 0
 
@@ -140,6 +183,7 @@ class VoiceFlowApp(rumps.App):
             self._hint_item,
             hotkey_menu,
             mode_menu,
+            warm_menu,
             rumps.MenuItem(
                 f"AI cleanup: {'on' if cfg.cleanup_enabled else 'off'}", callback=None
             ),
@@ -202,16 +246,65 @@ class VoiceFlowApp(rumps.App):
         sender.state = 1 if enabled else 0
         log.info("launch-at-login set to %s", enabled)
 
+    # --- keep-warm strategy ---------------------------------------------
+
+    def _on_ac(self) -> bool:
+        now = time.monotonic()
+        if now - self._ac_checked > AC_RECHECK:
+            self._ac_cached = power.on_ac_power()
+            self._ac_checked = now
+        return self._ac_cached
+
+    def _keepwarm_interval(self) -> float:
+        """How often to nudge the GPU right now, per strategy + power state."""
+        if self.cfg.warm_on_ac and self._on_ac():
+            return WARM_ACTIVE_INTERVAL  # plugged in: keep it hot, no battery cost
+        strategy = self.cfg.warm_strategy
+        if strategy == "always":
+            return WARM_ACTIVE_INTERVAL
+        if strategy == "battery_first":
+            return WARM_IDLE_INTERVAL
+        # adaptive: hot for a window after recent use, then relax
+        if time.monotonic() - self._last_activity < WARM_ACTIVE_WINDOW:
+            return WARM_ACTIVE_INTERVAL
+        return WARM_IDLE_INTERVAL
+
+    def _on_pick_warm(self, sender):
+        for name, item in self._warm_items.items():
+            if item is sender:
+                self.cfg.warm_strategy = name
+                config.save(self.cfg)
+                self._refresh_checks()
+                return
+
+    def _toggle_warm_ac(self, sender):
+        self.cfg.warm_on_ac = not self.cfg.warm_on_ac
+        sender.state = 1 if self.cfg.warm_on_ac else 0
+        config.save(self.cfg)
+
     def _worker(self):
-        """Single thread for all MLX work: warm up, then process dictations."""
+        """Single thread for all MLX work: warm up, then process dictations.
+
+        When idle, periodically runs a tiny keep-warm inference so MLX/Metal
+        stays hot, at a cadence set by the warm strategy and power state.
+        """
         try:
             transcribe.warm_up(self.cfg.model)
+            self._last_gpu = time.monotonic()
             AppHelper.callAfter(self._set_ready)
         except Exception as exc:  # surfaced in the menu, not fatal
             log.exception("model warm-up failed")
             AppHelper.callAfter(self._set_status, f"Status: model error — {exc}")
         while True:
-            audio = self._jobs.get()
+            try:
+                audio = self._jobs.get(timeout=self._keepwarm_interval())
+            except queue.Empty:
+                if not self._busy and not self._recording:
+                    ms = transcribe.keep_warm(self.cfg.model)
+                    self._last_gpu = time.monotonic()
+                    if ms > 700:  # only flag anomalously deep cold; ~450ms is normal
+                        log.info("keep-warm unusually slow: %.0f ms", ms)
+                continue
             if audio is None:
                 continue
             self._do_transcribe(audio)
@@ -250,6 +343,8 @@ class VoiceFlowApp(rumps.App):
             item.state = 1 if name == self.cfg.hotkey else 0
         for name, item in self._mode_items.items():
             item.state = 1 if name == self.cfg.mode else 0
+        for name, item in self._warm_items.items():
+            item.state = 1 if name == self.cfg.warm_strategy else 0
         self._hint_item.title = self._hint_text()
 
     def _apply_hotkey(self, name: str):
@@ -355,7 +450,11 @@ class VoiceFlowApp(rumps.App):
     def _enter_working_ui(self):
         self.title = WORKING
         if self.overlay:
-            self.overlay.show_transcribing()
+            cold = (time.monotonic() - self._last_gpu) > COLD_AFTER
+            if cold:
+                self.overlay.show_message("Warming up…")
+            else:
+                self.overlay.show_transcribing()
 
     def _save_fail_clip(self, audio):
         try:
@@ -395,6 +494,9 @@ class VoiceFlowApp(rumps.App):
             AppHelper.callAfter(self._set_status, f"Status: error — {exc}")
         finally:
             self._busy = False
+            now = time.monotonic()
+            self._last_gpu = now       # GPU just ran
+            self._last_activity = now  # real use → adaptive stays warm
             AppHelper.callAfter(self._reset_ui)
 
     def _reset_ui(self):

@@ -12,6 +12,7 @@ input shapes and reuses its compiled graph instead of recompiling per length.
 from __future__ import annotations
 
 import logging
+import time
 
 import mlx.core as mx
 import numpy as np
@@ -74,3 +75,20 @@ def warm_up(model_name: str) -> None:
             _run(model, np.zeros(int(seconds * sr), dtype=np.float32))
     except Exception:
         log.exception("warm-up inference failed")
+
+
+def keep_warm(model_name: str) -> float:
+    """A tiny inference to keep MLX/Metal resident and the GPU clocked up, so a
+    dictation after a long idle gap is just as fast as one mid-session.
+
+    Returns the elapsed milliseconds (a high value means the GPU had gone cold).
+    """
+    try:
+        model = load_model(model_name)
+        sr = model.preprocessor_config.sample_rate
+        t0 = time.time()
+        _run(model, np.zeros(int(BUCKET_SECONDS * sr), dtype=np.float32))
+        return (time.time() - t0) * 1000
+    except Exception:
+        log.exception("keep-warm failed")
+        return 0.0

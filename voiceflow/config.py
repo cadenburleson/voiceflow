@@ -33,6 +33,13 @@ class Config:
     continuous_mic: bool = True
     preroll_seconds: float = 0.5
 
+    # Keep-warm: the GPU clocks down after ~5s idle, making the next dictation
+    # slower. Strategy used ON BATTERY: "adaptive" (warm only ~2min after recent
+    # use), "always" (always warm), or "battery_first" (relaxed, saves power).
+    # When plugged in, warm_on_ac forces always-warm regardless (no battery cost).
+    warm_strategy: str = "adaptive"
+    warm_on_ac: bool = True
+
     # AI cleanup (optional, via Groq's OpenAI-compatible API)
     cleanup: bool = True
     groq_api_key: str = ""
@@ -71,6 +78,11 @@ def _render(cfg: Config) -> str:
         "# first words aren't clipped (macOS shows the orange mic dot while running).",
         f"continuous_mic = {b(cfg.continuous_mic)}",
         f"preroll_seconds = {cfg.preroll_seconds}",
+        "",
+        '# warm_strategy (on battery): "adaptive" | "always" | "battery_first".',
+        "# warm_on_ac forces always-warm while plugged in.",
+        f'warm_strategy = "{cfg.warm_strategy}"',
+        f"warm_on_ac = {b(cfg.warm_on_ac)}",
         "",
         "# AI cleanup fixes punctuation/casing and removes filler words.",
         "# Requires a Groq API key (free tier is fast + generous):",
