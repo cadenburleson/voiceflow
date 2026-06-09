@@ -14,6 +14,23 @@ on-device and typed into whatever app you're using.
 
 Requires Apple Silicon (M-series) and macOS 13.5+.
 
+## Download
+
+**[⬇️ Download the latest VoiceFlow.dmg](https://github.com/cadenburleson/voiceflow/releases/latest)**
+
+Open the `.dmg`, drag **VoiceFlow** into **Applications**, and launch it — no
+Python or developer tools needed.
+
+> **First launch only:** the app isn't notarized by Apple yet, so macOS will say
+> it "cannot be checked for malicious software." **Right-click the app → Open →
+> Open** that first time (just once); afterward it opens normally.
+
+On first run, grant **Microphone**, **Accessibility**, and **Input Monitoring**
+when prompted, then choose your hotkey from the 🎙️ menu-bar icon. The
+transcription model (~600 MB) downloads once on first use.
+
+Prefer to run from source instead? See [Setup](#setup) below.
+
 ## Setup
 
 ```bash
