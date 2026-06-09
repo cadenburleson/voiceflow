@@ -17,7 +17,11 @@ from PyInstaller.utils.hooks import collect_all, collect_submodules
 REPO_ROOT = os.path.dirname(SPECPATH)  # SPECPATH = the packaging/ dir
 
 datas, binaries, hiddenimports = [], [], []
-for pkg in ("mlx", "parakeet_mlx", "rumps", "sounddevice", "soundfile", "soxr", "huggingface_hub"):
+# AVFoundation/CoreMedia are collected whole so pyobjc's framework metadata
+# ships too — without it, constants like AVMediaTypeAudio fail to load in the
+# frozen app and the microphone-permission request silently no-ops.
+for pkg in ("mlx", "parakeet_mlx", "rumps", "sounddevice", "soundfile", "soxr",
+            "huggingface_hub", "AVFoundation", "CoreMedia"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

@@ -8,6 +8,8 @@ changes apply cleanly to a fresh process).
 
 from __future__ import annotations
 
+import logging
+
 import objc
 from AppKit import (
     NSApp,
@@ -24,6 +26,24 @@ from AppKit import (
     NSWorkspace,
 )
 from Foundation import NSURL, NSBundle, NSObject, NSTimer
+
+log = logging.getLogger("voiceflow.onboarding")
+
+
+def _audio_media_type():
+    """AVMediaTypeAudio, or its literal value ("soun") if the pyobjc constant
+    didn't load — which happens in a frozen/bundled app where the framework
+    metadata isn't fully present. Without this, the mic request is a no-op.
+    """
+    try:
+        from AVFoundation import AVMediaTypeAudio
+
+        if AVMediaTypeAudio:
+            return AVMediaTypeAudio
+    except Exception:
+        log.warning("AVMediaTypeAudio constant unavailable; falling back to literal 'soun'")
+    return "soun"
+
 
 # (settings-pane key, title, why)
 ROWS = [
@@ -44,10 +64,11 @@ _PANES = {
 
 def mic_ok() -> bool:
     try:
-        from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
+        from AVFoundation import AVCaptureDevice
 
-        return AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio) == 3
+        return AVCaptureDevice.authorizationStatusForMediaType_(_audio_media_type()) == 3
     except Exception:
+        log.exception("mic_ok check failed")
         return False
 
 
@@ -91,10 +112,12 @@ def _open_pane(key: str):
 def _request(key: str):
     try:
         if key == "microphone":
-            from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
+            from AVFoundation import AVCaptureDevice
 
+            mtype = _audio_media_type()
+            log.info("requesting microphone access (media type=%r)", mtype)
             AVCaptureDevice.requestAccessForMediaType_completionHandler_(
-                AVMediaTypeAudio, lambda granted: None
+                mtype, lambda granted: log.info("microphone access granted=%s", bool(granted))
             )
         elif key == "accessibility":
             from ApplicationServices import (
@@ -108,7 +131,7 @@ def _request(key: str):
 
             Quartz.CGRequestListenEventAccess()
     except Exception:
-        pass
+        log.exception("permission request failed for %s", key)
 
 
 W, H = 480, 392

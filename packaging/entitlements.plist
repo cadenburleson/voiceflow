@@ -9,6 +9,11 @@
 -->
 <plist version="1.0">
 <dict>
+    <!-- Required for microphone access under the hardened runtime. Without this,
+         the runtime blocks audio input: requestAccess returns false with no
+         prompt, and capture yields silence. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
     <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
