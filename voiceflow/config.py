@@ -68,7 +68,7 @@ def _render(cfg: Config) -> str:
         "# Hold the hotkey, speak, release -> text is typed at your cursor.",
         "# (The hotkey and mode can also be changed live from the menu bar.)",
         "",
-        f'hotkey = "{cfg.hotkey}"   # pynput key name; e.g. alt_r, cmd_r, f13',
+        f'hotkey = "{cfg.hotkey}"   # key name; e.g. fn (Function/Globe), alt_r, cmd_r, f13',
         f'mode = "{cfg.mode}"  # "push_to_talk" or "toggle"',
         "",
         f'model = "{cfg.model}"',

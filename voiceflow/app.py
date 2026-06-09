@@ -14,6 +14,7 @@ from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification
 from Foundation import NSObject, NSProcessInfo
 from PyObjCTools import AppHelper
 from pynput import keyboard
+from Quartz import CGEventGetFlags
 
 from . import audio, cleanup, config, loginitem, logsetup, onboarding, power, transcribe
 from .audio import Recorder
@@ -47,8 +48,16 @@ WARM_LABELS = dict(WARM_PRESETS)
 # throttling us while still letting the Mac sleep normally.
 _ACTIVITY_OPTS = 0x00FFFFFF
 
+# The Fn / 🌐 (globe) key. macOS reports it only as a modifier-flag change with
+# this mask (kCGEventFlagMaskSecondaryFn) — there's no Key.fn and no character,
+# and pynput can't tell its press from release, so we detect it from the flag
+# directly in a Quartz intercept rather than via on_press/on_release.
+FN_HOTKEY = "fn"
+FN_FLAG = 0x800000  # kCGEventFlagMaskSecondaryFn
+
 # Common conflict-free triggers offered in the menu. (name, friendly label)
 HOTKEY_PRESETS = [
+    (FN_HOTKEY, "Function / Globe 🌐 (Fn)"),
     ("ctrl_l", "Left Control ⌃"),
     ("ctrl_r", "Right Control ⌃"),
     ("cmd_l", "Left Command ⌘"),
@@ -65,6 +74,9 @@ MODE_PRESETS = [("push_to_talk", "Push to talk (hold)"), ("toggle", "Toggle (tap
 
 
 def _make_matcher(name: str):
+    if name == FN_HOTKEY:
+        # Fn never arrives as a normal key event; the Quartz intercept drives it.
+        return lambda k: False
     special = getattr(keyboard.Key, name, None)
     if special is not None:
         # macOS often reports left modifiers as the generic key (e.g. Key.ctrl
@@ -134,6 +146,7 @@ class VoiceFlowApp(rumps.App):
         self._busy = False  # transcribing/inserting — ignore the trigger
         self._capturing = False  # waiting to bind the next key press
         self._start_time = 0.0
+        self._fn_down = False  # tracks the Fn modifier flag for the "fn" hotkey
 
         # keep-warm bookkeeping (monotonic clocks)
         self._last_activity = time.monotonic()  # last real dictation
@@ -228,8 +241,11 @@ class VoiceFlowApp(rumps.App):
                 self._listener.stop()
             except Exception:
                 pass
+        self._fn_down = False
         self._listener = keyboard.Listener(
-            on_press=self._on_press, on_release=self._on_release
+            on_press=self._on_press,
+            on_release=self._on_release,
+            darwin_intercept=self._fn_intercept,
         )
         self._listener.start()
 
@@ -381,14 +397,25 @@ class VoiceFlowApp(rumps.App):
 
     # --- hotkey handling -------------------------------------------------
 
-    def _on_press(self, key):
-        if self._capturing:
-            name = _key_name(key)
-            if name:
-                self._capturing = False
-                AppHelper.callAfter(self._finish_capture, name)
-            return
-        if not self._matches(key) or self._busy:
+    def _fn_intercept(self, event_type, event):
+        """Drive the Fn / 🌐 hotkey from the raw modifier flag.
+
+        macOS only reports Fn as a flag change, and pynput can't classify its
+        press vs release, so we read the flag ourselves and fire on the 0→1 /
+        1→0 transitions. Always returns the event so Fn still works normally.
+        """
+        if self.cfg.hotkey == FN_HOTKEY and not self._capturing:
+            down = bool(CGEventGetFlags(event) & FN_FLAG)
+            if down != self._fn_down:
+                self._fn_down = down
+                if down:
+                    self._trigger_pressed()
+                else:
+                    self._trigger_released()
+        return event
+
+    def _trigger_pressed(self):
+        if self._busy:
             return
         if self.cfg.mode == "toggle":
             if self._recording:
@@ -399,9 +426,24 @@ class VoiceFlowApp(rumps.App):
             if not self._recording:
                 self._start()
 
-    def _on_release(self, key):
-        if self.cfg.mode != "toggle" and self._matches(key) and self._recording:
+    def _trigger_released(self):
+        if self.cfg.mode != "toggle" and self._recording:
             self._stop()
+
+    def _on_press(self, key):
+        if self._capturing:
+            name = _key_name(key)
+            if name:
+                self._capturing = False
+                AppHelper.callAfter(self._finish_capture, name)
+            return
+        # Fn is handled by _fn_intercept, not by key matching.
+        if self.cfg.hotkey != FN_HOTKEY and self._matches(key):
+            self._trigger_pressed()
+
+    def _on_release(self, key):
+        if self.cfg.hotkey != FN_HOTKEY and self._matches(key):
+            self._trigger_released()
 
     # --- recording -------------------------------------------------------
 
