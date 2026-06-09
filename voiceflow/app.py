@@ -14,7 +14,12 @@ from AppKit import NSWorkspace, NSWorkspaceDidWakeNotification
 from Foundation import NSObject, NSProcessInfo
 from PyObjCTools import AppHelper
 from pynput import keyboard
-from Quartz import CGEventGetFlags
+from Quartz import (
+    CGEventGetFlags,
+    CGEventGetIntegerValueField,
+    kCGEventFlagsChanged,
+    kCGKeyboardEventKeycode,
+)
 
 from . import audio, cleanup, config, loginitem, logsetup, onboarding, power, transcribe
 from .audio import Recorder
@@ -54,6 +59,7 @@ _ACTIVITY_OPTS = 0x00FFFFFF
 # directly in a Quartz intercept rather than via on_press/on_release.
 FN_HOTKEY = "fn"
 FN_FLAG = 0x800000  # kCGEventFlagMaskSecondaryFn
+FN_KEYCODE = 0x3F   # the physical Fn/Globe key (arrows etc. also carry FN_FLAG)
 
 # Common conflict-free triggers offered in the menu. (name, friendly label)
 HOTKEY_PRESETS = [
@@ -402,9 +408,16 @@ class VoiceFlowApp(rumps.App):
 
         macOS only reports Fn as a flag change, and pynput can't classify its
         press vs release, so we read the flag ourselves and fire on the 0→1 /
-        1→0 transitions. Always returns the event so Fn still works normally.
+        1→0 transitions. We must match the flag-change event for the physical
+        Fn keycode specifically: arrow/navigation/F-keys also carry FN_FLAG in
+        their key events, so checking the flag alone would fire on those too.
         """
-        if self.cfg.hotkey == FN_HOTKEY and not self._capturing:
+        if (
+            self.cfg.hotkey == FN_HOTKEY
+            and not self._capturing
+            and event_type == kCGEventFlagsChanged
+            and CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == FN_KEYCODE
+        ):
             down = bool(CGEventGetFlags(event) & FN_FLAG)
             if down != self._fn_down:
                 self._fn_down = down
