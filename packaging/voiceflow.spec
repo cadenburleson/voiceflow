@@ -66,7 +66,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="VoiceFlow.app",
-    icon=None,
+    icon=os.path.join(REPO_ROOT, "assets", "icon", "VoiceFlow.icns"),
     bundle_identifier="com.cadenburleson.voiceflow",
     info_plist={
         "CFBundleName": "VoiceFlow",

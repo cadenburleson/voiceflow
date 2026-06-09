@@ -1,0 +1,8 @@
+# Shared look for the VoiceFlow macOS app icon. Per-concept subject is passed via --subject.
+A modern macOS application icon in the current Apple style. The whole icon is an
+Apple "squircle" — a rounded-rectangle superellipse — filling the entire frame
+edge to edge, sitting on a plain pure-white background. Premium depth like a macOS
+Sonoma/Tahoe app icon: a smooth top-lit gradient, a soft inner glow, gentle
+specular sheen, and a faint soft drop shadow beneath the squircle. Bold, minimal,
+instantly readable even at small sizes, with one clear centered subject and clean
+crisp edges. Vibrant but tasteful. No text, no words, no letters, no UI chrome.

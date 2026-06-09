@@ -8,3 +8,10 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+
+# icon build intermediates + exploration renders (regenerable from final_r1.png)
+assets/icon/VoiceFlow.iconset/
+assets/icon/VoiceFlow_1024.png
+assets/icon/gemini/concept_*.png
+assets/icon/gemini/final_r2.png
+assets/icon/gemini/final_r3.png
