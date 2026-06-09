@@ -89,3 +89,8 @@ still lands in your real target app.
   warm after that.
 - **Cleanup not happening** → `GROQ_API_KEY` isn't set; the menu shows
   "AI cleanup: off".
+
+## License
+
+MIT — see [LICENSE](LICENSE). Use it, change it, ship it, sell it; just keep the
+copyright and license notice. No warranty.
