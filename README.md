@@ -18,15 +18,9 @@ Requires Apple Silicon (M-series) and macOS 13.5+.
 
 **[⬇️ Download the latest VoiceFlow.dmg](https://github.com/cadenburleson/voiceflow/releases/latest)**
 
-Open the `.dmg` and drag **VoiceFlow** into **Applications** — no Python or
-developer tools needed.
-
-> **First launch only:** the app is signed but not yet notarized by Apple, so
-> macOS quarantines downloads and blocks it. Clear the quarantine once in
-> Terminal, then double-click VoiceFlow normally:
-> ```bash
-> xattr -cr /Applications/VoiceFlow.app
-> ```
+Open the `.dmg`, drag **VoiceFlow** into **Applications**, and double-click it —
+no Python or developer tools needed. The app is signed and notarized by Apple,
+so it just opens (no Gatekeeper warning).
 
 On first run, grant **Microphone**, **Accessibility**, and **Input Monitoring**
 when prompted, then choose your hotkey from the 🎙️ menu-bar icon. The

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for notarizing the PyInstaller bundle under the hardened runtime.
+  - allow-jit / allow-unsigned-executable-memory: CPython and some native deps
+    allocate executable memory; without these the hardened runtime kills them.
+  - disable-library-validation: the bundle ships many third-party dylibs/.so
+    files; this lets the app load them even though they weren't all signed by us.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>
