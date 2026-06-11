@@ -27,6 +27,9 @@ class Config:
     # Transcription (local, MLX)
     model: str = "mlx-community/parakeet-tdt-0.6b-v2"
     samplerate: int = 16000
+    # Transcribe while you speak so the text is ready the moment you release
+    # the hotkey. Set false to transcribe the whole clip after release instead.
+    streaming: bool = True
 
     # Mic capture. Continuous keeps the stream warm with a rolling pre-roll
     # buffer so the start of speech is never clipped (macOS shows the mic dot).
@@ -73,6 +76,8 @@ def _render(cfg: Config) -> str:
         "",
         f'model = "{cfg.model}"',
         f"samplerate = {cfg.samplerate}",
+        "# streaming transcribes while you speak (fastest); false = after release.",
+        f"streaming = {b(cfg.streaming)}",
         "",
         "# continuous_mic keeps the mic warm with a rolling pre-roll buffer so the",
         "# first words aren't clipped (macOS shows the orange mic dot while running).",

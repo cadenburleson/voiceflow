@@ -75,8 +75,8 @@ app = BUNDLE(
     info_plist={
         "CFBundleName": "VoiceFlow",
         "CFBundleDisplayName": "VoiceFlow",
-        "CFBundleShortVersionString": "0.1.0",
-        "CFBundleVersion": "0.1.0",
+        "CFBundleShortVersionString": "0.2.0",
+        "CFBundleVersion": "0.2.0",
         "LSUIElement": True,  # menu-bar only, no Dock icon
         "NSMicrophoneUsageDescription": "VoiceFlow records your voice to transcribe it into text.",
         "NSHighResolutionCapable": True,

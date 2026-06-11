@@ -39,7 +39,7 @@ LOADING = "⏳"
 WARM_ACTIVE_INTERVAL = 2.0   # keep the GPU mostly hot during active use
 WARM_IDLE_INTERVAL = 30.0    # relaxed (battery saver) — bounds deep-cold only
 WARM_ACTIVE_WINDOW = 120.0   # "adaptive": stay hot this long after last use
-COLD_AFTER = 5.0             # show "Warming up…" if the GPU has been idle longer
+COLD_AFTER = 5.0             # GPU counts as cold after this much idle — prewarm on record start
 AC_RECHECK = 15.0            # re-check power source at most this often
 
 WARM_PRESETS = [
@@ -52,6 +52,29 @@ WARM_LABELS = dict(WARM_PRESETS)
 # NSActivityUserInitiated without the sleep-disable bit: prevents App Nap from
 # throttling us while still letting the Mac sleep normally.
 _ACTIVITY_OPTS = 0x00FFFFFF
+
+
+def _promote_thread_qos():
+    """Mark the calling thread user-interactive.
+
+    A Finder-launched bundle gets default/utility QoS for plain Python
+    threads, which can land the MLX worker on efficiency cores and deprioritize
+    its GPU submissions — dictations then run several times slower than the
+    same code in a terminal. Must be called ON the worker thread.
+    """
+    try:
+        import ctypes
+        import ctypes.util
+
+        QOS_CLASS_USER_INTERACTIVE = 0x21
+        libc = ctypes.CDLL(ctypes.util.find_library("c"))
+        err = libc.pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0)
+        if err:
+            log.warning("pthread_set_qos_class_self_np failed: %d", err)
+        else:
+            log.info("MLX worker thread promoted to user-interactive QoS")
+    except Exception:
+        log.exception("could not set worker thread QoS")
 
 # The Fn / 🌐 (globe) key. macOS reports it only as a modifier-flag change with
 # this mask (kCGEventFlagMaskSecondaryFn) — there's no Key.fn and no character,
@@ -257,6 +280,8 @@ class VoiceFlowApp(rumps.App):
 
     def _on_wake(self):
         log.info("woke from sleep — restarting hotkey listener and refreshing audio")
+        if self._recording:
+            self._jobs.put(("abort",))  # discard any session interrupted by sleep
         self._recording = False
         self._capturing = False
         self._start_listener()
@@ -307,29 +332,64 @@ class VoiceFlowApp(rumps.App):
     def _worker(self):
         """Single thread for all MLX work: warm up, then process dictations.
 
-        When idle, periodically runs a tiny keep-warm inference so MLX/Metal
-        stays hot, at a cadence set by the warm strategy and power state.
+        Jobs are tuples: ("start",) opens a streaming session, ("audio", chunk)
+        feeds it while the user is still speaking, ("stop", full_clip) finishes
+        and inserts, ("abort",) discards. When idle, periodically runs a tiny
+        keep-warm inference so MLX/Metal stays hot, at a cadence set by the
+        warm strategy and power state.
         """
+        _promote_thread_qos()
         try:
-            transcribe.warm_up(self.cfg.model)
+            transcribe.warm_up(self.cfg.model, streaming=self.cfg.streaming)
             self._last_gpu = time.monotonic()
             AppHelper.callAfter(self._set_ready)
         except Exception as exc:  # surfaced in the menu, not fatal
             log.exception("model warm-up failed")
             AppHelper.callAfter(self._set_status, f"Status: model error — {exc}")
+        session: transcribe.StreamSession | None = None
         while True:
             try:
-                audio = self._jobs.get(timeout=self._keepwarm_interval())
+                job = self._jobs.get(timeout=self._keepwarm_interval())
             except queue.Empty:
-                if not self._busy and not self._recording:
+                if session is None and not self._busy and not self._recording:
                     ms = transcribe.keep_warm(self.cfg.model)
                     self._last_gpu = time.monotonic()
-                    if ms > 700:  # only flag anomalously deep cold; ~450ms is normal
+                    if ms > 700:  # only flag anomalously deep cold
                         log.info("keep-warm unusually slow: %.0f ms", ms)
                 continue
-            if audio is None:
-                continue
-            self._do_transcribe(audio)
+            kind = job[0]
+            if kind == "start":
+                session = self._open_session()
+            elif kind == "audio":
+                if session is not None:
+                    try:
+                        session.add(job[1])
+                        self._last_gpu = time.monotonic()
+                    except Exception:
+                        log.exception("streaming add failed — will fall back to batch")
+                        session.close()
+                        session = None
+            elif kind == "abort":
+                if session is not None:
+                    session.close()
+                    session = None
+            elif kind == "stop":
+                self._finish_dictation(job[1], session)
+                session = None
+
+    def _open_session(self) -> transcribe.StreamSession | None:
+        if not self.cfg.streaming:
+            return None
+        try:
+            # If the GPU has clocked down, nudge it now — the cost hides
+            # behind the user's speech instead of delaying the paste.
+            if time.monotonic() - self._last_gpu > COLD_AFTER:
+                transcribe.keep_warm(self.cfg.model)
+                self._last_gpu = time.monotonic()
+            return transcribe.StreamSession(self.cfg.model)
+        except Exception:
+            log.exception("could not open streaming session — will batch instead")
+            return None
 
     def _set_ready(self):
         self.title = IDLE
@@ -471,6 +531,7 @@ class VoiceFlowApp(rumps.App):
             AppHelper.callAfter(self._set_status, f"Status: mic error — {exc}")
             return
         log.info("recording started")
+        self._jobs.put(("start",))
         AppHelper.callAfter(self._enter_listening_ui)
 
     def _enter_listening_ui(self):
@@ -495,21 +556,18 @@ class VoiceFlowApp(rumps.App):
 
         if duration < self.cfg.min_seconds or audio.size == 0:
             log.info("stop: too short (<%.2fs) or empty — discarding", self.cfg.min_seconds)
+            self._jobs.put(("abort",))
             AppHelper.callAfter(self._reset_ui)
             return
 
         self._busy = True
         AppHelper.callAfter(self._enter_working_ui)
-        self._jobs.put(audio)
+        self._jobs.put(("stop", audio))
 
     def _enter_working_ui(self):
         self.title = WORKING
         if self.overlay:
-            cold = (time.monotonic() - self._last_gpu) > COLD_AFTER
-            if cold:
-                self.overlay.show_message("Warming up…")
-            else:
-                self.overlay.show_transcribing()
+            self.overlay.show_transcribing()
 
     def _save_fail_clip(self, audio):
         try:
@@ -524,15 +582,29 @@ class VoiceFlowApp(rumps.App):
         except Exception:
             log.exception("fail-clip save failed")
 
-    def _do_transcribe(self, audio):
+    def _finish_dictation(self, audio, session):
         try:
             peak = float(np.max(np.abs(audio))) if audio.size else 0.0
             rms = float(np.sqrt(np.mean(audio**2))) if audio.size else 0.0
             t0 = time.time()
-            text = transcribe.transcribe(audio, self.cfg.samplerate, self.cfg.model)
+            text = None
+            mode = "batch"
+            if session is not None:
+                try:
+                    text = session.finish(audio[session.consumed:])
+                    mode = "stream"
+                except Exception:
+                    log.exception("streaming finish failed — falling back to batch")
+                    session.close()
+                    text = None
+                if not text:
+                    text = None  # empty stream result: give batch a shot
+            if text is None:
+                text = transcribe.transcribe(audio, self.cfg.samplerate, self.cfg.model)
             log.info(
-                "transcribed %d chars in %.0f ms (%.2fs audio, peak=%.3f rms=%.4f)",
-                len(text), (time.time() - t0) * 1000, audio.size / self.cfg.samplerate, peak, rms,
+                "transcribed (%s) %d chars in %.0f ms (%.2fs audio, peak=%.3f rms=%.4f)",
+                mode, len(text), (time.time() - t0) * 1000,
+                audio.size / self.cfg.samplerate, peak, rms,
             )
             if not text.strip() and audio.size:
                 self._save_fail_clip(audio)
@@ -559,8 +631,15 @@ class VoiceFlowApp(rumps.App):
         if self.overlay:
             self.overlay.hide()
 
-    # --- meter -----------------------------------------------------------
+    # --- meter / streaming pump -------------------------------------------
 
     def _tick_level(self, _timer):
-        if self.overlay and self._recording:
+        if not self._recording:
+            return
+        if self.overlay:
             self.overlay.set_level(self.recorder.level)
+        # Pump new mic audio to the worker so transcription happens while the
+        # user is still speaking. Chunking/buffering is the session's job.
+        chunk = self.recorder.drain()
+        if chunk.size:
+            self._jobs.put(("audio", chunk))

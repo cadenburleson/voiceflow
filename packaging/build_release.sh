@@ -17,7 +17,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 SIGN_ID="${SIGN_ID:-Developer ID Application: Caden Burleson (9GW225XZWY)}"
 ASC_KEY="${ASC_KEY:-$HOME/Downloads/AuthKey_VLV3LKZZY2.p8}"
 ASC_KEY_ID="${ASC_KEY_ID:-VLV3LKZZY2}"

@@ -49,6 +49,7 @@ class Recorder:
         self._frames: list[np.ndarray] = []
         self._lock = threading.Lock()
         self._active = False  # True while a dictation is being captured
+        self._drain_idx = 0  # frames already handed out via drain()
         self.level = 0.0  # smoothed RMS in [0, 1], read by the overlay
         self._last_cb = 0.0  # monotonic time of the last audio callback
 
@@ -137,11 +138,28 @@ class Recorder:
                 self.reopen()
             with self._lock:
                 self._active = True  # stop trimming; keep the pre-roll we have
+                self._drain_idx = 0  # first drain() includes the pre-roll
         else:
             with self._lock:
                 self._frames = []
+                self._drain_idx = 0
             self.level = 0.0
             self._stream = self._open_with_retry()
+
+    def drain(self) -> np.ndarray:
+        """New audio since the last drain() (empty unless recording).
+
+        Frames stay in place — stop() still returns the complete clip — we
+        only advance a cursor so a streaming consumer sees each sample once.
+        """
+        with self._lock:
+            if not (self._active if self.continuous else self._stream is not None):
+                return np.zeros(0, dtype=np.float32)
+            new = self._frames[self._drain_idx:]
+            self._drain_idx = len(self._frames)
+        if not new:
+            return np.zeros(0, dtype=np.float32)
+        return np.concatenate(new).astype(np.float32)
 
     def stop(self) -> np.ndarray:
         if self.continuous:

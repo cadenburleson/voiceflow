@@ -1,12 +1,19 @@
 """Local transcription via parakeet-mlx (Apple Silicon).
 
-We feed the in-memory mic audio straight to the model: compute the log-mel and
-call generate(), skipping parakeet's file path entirely. That avoids a temp
-WAV write AND an ffmpeg subprocess spawn per dictation (parakeet's load_audio
-shells out to ffmpeg) — both slow and variable, the main source of "hiccups".
+Two paths:
 
-Audio is padded to fixed 2-second buckets so MLX sees a small set of repeating
-input shapes and reuses its compiled graph instead of recompiling per length.
+- Streaming (default): a StreamSession is opened when recording starts and mic
+  audio is fed to the model in fixed-size chunks while the user is still
+  speaking. On hotkey release only the buffered tail remains to process, so
+  insertion latency is near-constant regardless of dictation length. Fixed
+  chunk sizes keep MLX on a small set of compiled graphs.
+
+- Batch (fallback, and `streaming = false` in config): the whole clip in one
+  generate() call. We feed the in-memory mic audio straight to the model,
+  skipping parakeet's file path (temp WAV + ffmpeg subprocess). Audio is
+  padded to 2-second buckets so repeated lengths reuse compiled graphs —
+  though a long dictation can still hit a new bucket and pay a multi-second
+  graph compile, which is why streaming is the default.
 """
 
 from __future__ import annotations
@@ -24,6 +31,26 @@ _model = None
 _model_name: str | None = None
 
 BUCKET_SECONDS = 2.0
+
+# Keep-warm runs constantly while idle; use a small input so each nudge is
+# cheap (it only needs to keep the GPU clocked and Metal resident).
+KEEP_WARM_SECONDS = 0.5
+
+# Streaming: chunk size fed to the model while recording, and the local
+# attention window (left, right) in encoder frames (~80ms each). The right
+# context bounds how much mel history is re-encoded per chunk, i.e. the
+# steady per-chunk cost. depth = how many encoder layers carry exact KV cache
+# across chunks. (256, 256)/depth 2 measured word-identical to batch output
+# on test clips; smaller right context or depth 1 dropped/garbled words near
+# chunk boundaries.
+CHUNK_SECONDS = 2.0
+STREAM_CONTEXT = (256, 256)
+STREAM_DEPTH = 2
+
+# Final-flush skip: if everything still buffered at hotkey release peaks below
+# this, it's room tone, not speech — don't pay a whole inference for it.
+# (Logged speech peaks are 0.6+; keep a wide margin so words are never lost.)
+SILENCE_PEAK = 0.008
 
 
 def load_model(name: str):
@@ -64,15 +91,85 @@ def transcribe(audio: np.ndarray, samplerate: int, model_name: str) -> str:
     return _run(model, _bucketed(audio, samplerate))
 
 
-def warm_up(model_name: str) -> None:
-    """Preload the model and pre-compile the common bucket shapes so the first
-    real dictations don't pay MLX's per-shape graph-compile cost.
+class StreamSession:
+    """A live transcription session fed incrementally while recording.
+
+    MLX's Metal stream is thread-local: create, feed, and finish a session on
+    the same (single) MLX worker thread as all other model work.
+    """
+
+    def __init__(self, model_name: str):
+        self._model = load_model(model_name)
+        self._sr = self._model.preprocessor_config.sample_rate
+        self._chunk = int(CHUNK_SECONDS * self._sr)
+        self._pending: list[np.ndarray] = []
+        self._pending_n = 0
+        self.consumed = 0  # total samples accepted via add()/finish()
+        self._stream = self._model.transcribe_stream(
+            context_size=STREAM_CONTEXT, depth=STREAM_DEPTH
+        ).__enter__()
+        self._closed = False
+
+    def add(self, audio: np.ndarray) -> None:
+        """Buffer mic audio; runs the model once per full fixed-size chunk."""
+        if audio.size == 0:
+            return
+        self.consumed += int(audio.size)
+        self._pending.append(audio)
+        self._pending_n += int(audio.size)
+        while self._pending_n >= self._chunk:
+            buf = np.concatenate(self._pending) if len(self._pending) > 1 else self._pending[0]
+            piece, rest = buf[: self._chunk], buf[self._chunk :]
+            self._pending = [rest] if rest.size else []
+            self._pending_n = int(rest.size)
+            self._stream.add_audio(mx.array(piece))
+
+    def finish(self, tail: np.ndarray) -> str:
+        """Feed the final samples, flush the remainder (padded with silence to
+        the fixed chunk shape so no new graph is compiled), and return the
+        transcript. The session is closed afterwards."""
+        self.add(tail)
+        if self._pending_n:
+            buf = np.concatenate(self._pending) if len(self._pending) > 1 else self._pending[0]
+            if float(np.max(np.abs(buf))) > SILENCE_PEAK:
+                pad = self._chunk - buf.size
+                if pad > 0:
+                    buf = np.concatenate([buf, np.zeros(pad, dtype=buf.dtype)])
+                self._stream.add_audio(mx.array(buf))
+            else:
+                log.info("final flush skipped: %.2fs of silence", buf.size / self._sr)
+            self._pending, self._pending_n = [], 0
+        text = self._stream.result.text
+        self.close()
+        return (text or "").strip()
+
+    def close(self) -> None:
+        """Restore the model's batch attention mode. Safe to call twice."""
+        if not self._closed:
+            self._closed = True
+            try:
+                self._stream.__exit__(None, None, None)
+            except Exception:
+                log.exception("stream close failed")
+
+
+def warm_up(model_name: str, streaming: bool = True) -> None:
+    """Preload the model and pre-compile the graph shapes the app will hit, so
+    the first real dictations don't pay MLX's per-shape graph-compile cost.
     """
     model = load_model(model_name)
     sr = model.preprocessor_config.sample_rate
     try:
-        for seconds in (BUCKET_SECONDS, 2 * BUCKET_SECONDS, 3 * BUCKET_SECONDS):
-            _run(model, np.zeros(int(seconds * sr), dtype=np.float32))
+        _run(model, np.zeros(int(KEEP_WARM_SECONDS * sr), dtype=np.float32))
+        if streaming:
+            # First-chunk shape, steady-state shape, and the padded final flush.
+            session = StreamSession(model_name)
+            for _ in range(3):
+                session.add(np.zeros(int(CHUNK_SECONDS * sr), dtype=np.float32))
+            session.finish(np.zeros(sr // 2, dtype=np.float32))
+        else:
+            for seconds in (BUCKET_SECONDS, 2 * BUCKET_SECONDS, 3 * BUCKET_SECONDS):
+                _run(model, np.zeros(int(seconds * sr), dtype=np.float32))
     except Exception:
         log.exception("warm-up inference failed")
 
@@ -87,7 +184,7 @@ def keep_warm(model_name: str) -> float:
         model = load_model(model_name)
         sr = model.preprocessor_config.sample_rate
         t0 = time.time()
-        _run(model, np.zeros(int(BUCKET_SECONDS * sr), dtype=np.float32))
+        _run(model, np.zeros(int(KEEP_WARM_SECONDS * sr), dtype=np.float32))
         return (time.time() - t0) * 1000
     except Exception:
         log.exception("keep-warm failed")

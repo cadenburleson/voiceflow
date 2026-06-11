@@ -10,6 +10,9 @@ import requests
 
 _ENDPOINT = "https://api.groq.com/openai/v1/chat/completions"
 
+# Keep-alive connection pool: skips the TCP+TLS handshake on every dictation.
+_session = requests.Session()
+
 _SYSTEM = (
     "You clean up dictated speech-to-text. Fix punctuation, capitalization, and "
     "obvious transcription slips. Remove filler words (um, uh, like, you know). "
@@ -22,7 +25,7 @@ def clean(text: str, api_key: str, model: str, timeout: float = 8.0) -> str:
     if not api_key or not text.strip():
         return text
     try:
-        resp = requests.post(
+        resp = _session.post(
             _ENDPOINT,
             headers={"Authorization": f"Bearer {api_key}"},
             json={

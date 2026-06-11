@@ -1,6 +1,6 @@
 [project]
 name = "voiceflow"
-version = "0.1.0"
+version = "0.2.0"
 description = "Fast, local push-to-talk dictation for macOS (a Wispr Flow-style tool)"
 readme = "README.md"
 license = "MIT"
