@@ -30,6 +30,9 @@ class Config:
     # Transcribe while you speak so the text is ready the moment you release
     # the hotkey. Set false to transcribe the whole clip after release instead.
     streaming: bool = True
+    # Weight quantization: 8 is ~10-15% faster with no measured accuracy loss;
+    # 0 disables (full bf16). 4 is not recommended (slower, more accuracy risk).
+    quantize_bits: int = 8
 
     # Mic capture. Continuous keeps the stream warm with a rolling pre-roll
     # buffer so the start of speech is never clipped (macOS shows the mic dot).
@@ -78,6 +81,8 @@ def _render(cfg: Config) -> str:
         f"samplerate = {cfg.samplerate}",
         "# streaming transcribes while you speak (fastest); false = after release.",
         f"streaming = {b(cfg.streaming)}",
+        "# quantize_bits: 8 = faster/lighter (recommended), 0 = full precision.",
+        f"quantize_bits = {cfg.quantize_bits}",
         "",
         "# continuous_mic keeps the mic warm with a rolling pre-roll buffer so the",
         "# first words aren't clipped (macOS shows the orange mic dot while running).",

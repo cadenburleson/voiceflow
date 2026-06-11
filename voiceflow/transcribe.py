@@ -28,7 +28,13 @@ from parakeet_mlx.audio import get_logmel
 log = logging.getLogger("voiceflow.transcribe")
 
 _model = None
-_model_name: str | None = None
+_model_key: str | None = None
+
+# Weight quantization (set from config at startup). 8 measured ~10-15% faster
+# than bf16 with zero word diffs on test clips; 4-bit was SLOWER (dequant
+# overhead beats the bandwidth savings at this model size). 0 = full bf16.
+QUANT_BITS = 0
+QUANT_GROUP = 64
 
 BUCKET_SECONDS = 2.0
 
@@ -53,14 +59,40 @@ STREAM_DEPTH = 2
 SILENCE_PEAK = 0.008
 
 
+def _quantize(model, bits: int) -> None:
+    """Quantize the FFN/decoder linear layers in place.
+
+    Attention layers stay bf16: streaming's local-attention swap rebuilds them
+    as plain nn.Linear and can't load quantized weights.
+    """
+    import mlx.nn as nn
+
+    def pred(path, m):
+        return (
+            isinstance(m, nn.Linear)
+            and m.weight.shape[-1] % QUANT_GROUP == 0
+            and "self_attn" not in path
+        )
+
+    nn.quantize(model, group_size=QUANT_GROUP, bits=bits, class_predicate=pred)
+
+
 def load_model(name: str):
     """Load (and cache) the MLX model. Downloads from HF on first use."""
-    global _model, _model_name
-    if _model is None or _model_name != name:
+    global _model, _model_key
+    key = f"{name}#q{QUANT_BITS}"
+    if _model is None or _model_key != key:
         from parakeet_mlx import from_pretrained
 
-        _model = from_pretrained(name)
-        _model_name = name
+        model = from_pretrained(name)
+        if QUANT_BITS:
+            try:
+                _quantize(model, QUANT_BITS)
+                log.info("model quantized to %d-bit (attention kept bf16)", QUANT_BITS)
+            except Exception:
+                log.exception("quantization failed — continuing in bf16")
+        _model = model
+        _model_key = key
     return _model
 
 

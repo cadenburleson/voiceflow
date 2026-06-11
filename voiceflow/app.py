@@ -339,6 +339,7 @@ class VoiceFlowApp(rumps.App):
         warm strategy and power state.
         """
         _promote_thread_qos()
+        transcribe.QUANT_BITS = self.cfg.quantize_bits
         try:
             transcribe.warm_up(self.cfg.model, streaming=self.cfg.streaming)
             self._last_gpu = time.monotonic()
