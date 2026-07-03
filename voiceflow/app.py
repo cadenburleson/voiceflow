@@ -285,6 +285,13 @@ class VoiceFlowApp(rumps.App):
         self._recording = False
         self._capturing = False
         self._start_listener()
+        # CoreAudio can deadlock inside PortAudio's teardown/reinit right after
+        # a sleep/wake cycle. This notification fires on the main thread, so a
+        # hang here would freeze the whole UI (menu, hotkeys) forever — run it
+        # on a background thread so a stuck reinit only breaks the mic.
+        threading.Thread(target=self._reinit_audio, daemon=True).start()
+
+    def _reinit_audio(self):
         audio.reinit()
         self.recorder.reopen()
 
